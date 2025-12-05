@@ -1,5 +1,6 @@
 defmodule Pakman.Bootstrap do
   alias Pakman.Environment
+  alias Pakman.Setup
   alias Pakman.Bootstrap.Templates
 
   @system Application.compile_env(:pakman, :system) || System
@@ -7,9 +8,10 @@ defmodule Pakman.Bootstrap do
   def perform(options \\ []) do
     workspace = System.get_env("GITHUB_WORKSPACE")
 
-    @system.cmd("sudo", ["chown", "-R", "builder:abuild", workspace])
+    @system.cmd("sudo", ["chown", "-R", "runner:abuild", workspace])
 
-    %{organization: namespace, name: name} = Environment.repository()
+    %{organization: namespace, name: name, slug: slug} =
+      Environment.repository()
 
     {version, _} = System.cmd("git", ["describe", "--tags", "--always"])
 
@@ -23,7 +25,7 @@ defmodule Pakman.Bootstrap do
     base_path = Path.join(workspace, ".apk/#{namespace}/#{name}")
 
     config_file =
-      Keyword.get(options, :config_file) ||
+      Keyword.get(options, :config) ||
         Path.join(workspace, "instellar.yml")
 
     config = YamlElixir.read_from_file!(config_file)
@@ -33,6 +35,15 @@ defmodule Pakman.Bootstrap do
         ["!check"]
       else
         ["!check", "!tracedeps"]
+      end
+
+    strip_binary = Map.get(config["build"], "strip_binary", true)
+
+    options =
+      if strip_binary == false do
+        options ++ ["!strip"]
+      else
+        options
       end
 
     config =
@@ -54,21 +65,21 @@ defmodule Pakman.Bootstrap do
       "custom" ->
         create_apkbuild(
           base_path,
-          name,
+          slug,
           String.trim(version),
           String.trim(build),
           config
         )
 
-        create_file(base_path, name, :pre_install)
+        create_file(base_path, slug, :pre_install)
 
         Map.get(config, "hook", %{})
-        |> Enum.map(&create_hook_file(&1, base_path, name))
+        |> Enum.map(&create_hook_file(&1, base_path, slug))
 
       _ ->
         create_apkbuild(
           base_path,
-          name,
+          slug,
           String.trim(version),
           String.trim(build),
           config
@@ -78,13 +89,13 @@ defmodule Pakman.Bootstrap do
           create_life_cycle_files(base_path, run_config)
         end
 
-        create_build_files(base_path, name, config["type"])
+        create_build_files(base_path, slug, config["type"])
 
         Map.get(config, "hook", %{})
-        |> Enum.map(&create_hook_file(&1, base_path, name))
+        |> Enum.map(&create_hook_file(&1, base_path, slug))
     end
 
-    Pakman.setup()
+    Setup.perform()
   end
 
   defp create_apkbuild(base_path, name, version, build, configuration) do
@@ -139,7 +150,11 @@ defmodule Pakman.Bootstrap do
 
     [base_path, "#{name}.finish"]
     |> Path.join()
-    |> File.write(Templates.finish(configuration))
+    |> File.write!(Templates.finish(configuration))
+
+    [base_path, "#{name}.log"]
+    |> Path.join()
+    |> File.write!(Templates.log(name))
   end
 
   defp create_hook_file({hook_name, content}, base_path, name) do
@@ -149,13 +164,16 @@ defmodule Pakman.Bootstrap do
   end
 
   defp create_file(base_path, name, type) do
-    file_type =
-      type
-      |> Atom.to_string()
-      |> String.replace("_", "-")
+    file_type = generate_file_type(type)
 
     [base_path, "#{name}.#{file_type}"]
     |> Path.join()
     |> File.write!(apply(Templates, type, [name]))
+  end
+
+  defp generate_file_type(type) do
+    type
+    |> Atom.to_string()
+    |> String.replace("_", "-")
   end
 end
